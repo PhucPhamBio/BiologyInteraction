@@ -1,0 +1,22 @@
+Metadata-Version: 2.2
+Name: ultrafast
+Version: 0.1.0
+Summary: Ultra-high-throughput Virtual Screening
+Author: Andrew McNutt, Abhinav Adduri, Monica Dayao
+Author-email: Caleb Ellington <cellingt@andrew.cmu.edu>
+License-File: LICENSE
+Requires-Dist: lightning==2.4.0
+Requires-Dist: torch==2.4.1
+Requires-Dist: pandas==2.1.4
+Requires-Dist: wandb==0.17.8
+Requires-Dist: omegaconf==2.3.0
+Requires-Dist: scikit_learn==1.2.2
+Requires-Dist: PyTDC==1.1.1
+Requires-Dist: rdkit==2023.9.5
+Requires-Dist: datamol==0.12.5
+Requires-Dist: fair-esm==2.0.0
+Requires-Dist: molfeat==0.10.1
+Requires-Dist: transformers==4.43.4
+Requires-Dist: chromadb==0.5.5
+Requires-Dist: gdown==5.2.0
+Requires-Dist: ml-pyxis@ git+https://github.com/vicolab/ml-pyxis.git@master

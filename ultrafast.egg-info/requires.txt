@@ -1,0 +1,15 @@
+lightning==2.4.0
+torch==2.4.1
+pandas==2.1.4
+wandb==0.17.8
+omegaconf==2.3.0
+scikit_learn==1.2.2
+PyTDC==1.1.1
+rdkit==2023.9.5
+datamol==0.12.5
+fair-esm==2.0.0
+molfeat==0.10.1
+transformers==4.43.4
+chromadb==0.5.5
+gdown==5.2.0
+ml-pyxis@ git+https://github.com/vicolab/ml-pyxis.git@master

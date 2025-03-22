@@ -1,0 +1,6 @@
+data/
+analysis/
+best_models/
+checkpoints/
+examples/
+wandb/

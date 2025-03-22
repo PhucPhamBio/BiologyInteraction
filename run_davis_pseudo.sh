@@ -1,0 +1,2 @@
+# ultrafast-test --exp-id DAVIS --config configs/saprot_agg_config.yaml --checkpoint best_models/DAVIS_pseudo/davis_pseudo.ckpt
+ultrafast-train --exp-id DAVIS_pseudo --config configs/saprot_agg_config.yaml --batch-size 64 --InfoNCEWeight 0.05
