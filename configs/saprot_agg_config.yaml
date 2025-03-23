@@ -1,9 +1,10 @@
 task: davis
 contrastive: False
-InfoNCEWeight: 0.05
-drug_featurizer: MolFormerFeaturizer
+InfoNCEWeight: 0.0
+
+drug_featurizer: MorganFeaturizer
 target_featurizer: SaProtFeaturizer
-latent_dimension: 1024
+latent_dimension: 1280 # for transformer only; should be 1024 for others
 model_size: "small"
 prot_proj: "agg"
 loss_type: "CE"
@@ -11,19 +12,18 @@ num_heads_agg: 4
 dropout: 0.05
 sigmoid_scalar: 5
 
-batch_size: 1024
+batch_size: 64
 shuffle: True
 num_workers: 0
 
 epochs: 250
-every_n_val: 1
+every_n_val: 10
 lr: 1e-5
 lr_t0: 10
 weight_decay: 0
 
 replicate: 0
+experiment_id : davis_trans_fused_trans
 
 wandb_proj: ConPlexTrain
-model_save_dir: ./best_models
-
-
+model_save_dir: ./best_models/davis_trans_fused_trans

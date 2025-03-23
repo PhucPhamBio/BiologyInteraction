@@ -3,10 +3,11 @@ import wandb
 from torch import nn
 import torch.nn.functional as F
 from ultrafast.contrastive_loss import MarginScheduledLossFunction, InfoNCELoss
-from ultrafast.modules import AverageNonZeroVectors, Learned_Aggregation_Layer, TargetEmbedding, LargeDrugProjector, LargeProteinProjector, VICReg
-import numpy as np
+from ultrafast.modules import AverageNonZeroVectors, Learned_Aggregation_Layer, TargetEmbedding, LargeDrugProjector, LargeProteinProjector, Transformer
+
 import pytorch_lightning as pl
 import torchmetrics
+from ultrafast.bi_intention import BiIntention
 
 class FocalLoss(nn.Module):
     ### https://github.com/facebookresearch/fvcore/blob/main/fvcore/nn/focal_loss.py
@@ -56,6 +57,7 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         args=None,
     ):
         super().__init__()
+
         self.automatic_optimization = False # We will handle the optimization step ourselves
         self.drug_dim = drug_dim
         self.target_dim = target_dim
@@ -73,7 +75,7 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
 
         if prot_proj == "avg":
             protein_projector=nn.Sequential(AverageNonZeroVectors(), nn.Linear(self.target_dim, self.latent_dim))
-        elif prot_proj == "transformer":
+        elif prot_proj == "transformer": # target dim = 1280, laten_dim = 1024
             protein_projector = TargetEmbedding( self.target_dim, self.latent_dim, self.args.num_layers_target, dropout=dropout, out_type=args.out_type)
         elif prot_proj == "agg":
             protein_projector = nn.Sequential(Learned_Aggregation_Layer(self.target_dim, num_heads=self.args.num_heads_agg, attn_drop=dropout, proj_drop=dropout), nn.Linear(self.target_dim, self.latent_dim))
@@ -81,7 +83,7 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         if 'model_size' in args and args.model_size == "large":  # override the above settings and use a large model for drug and target
             self.drug_projector = LargeDrugProjector(self.drug_dim, self.latent_dim, self.activation, dropout)
             protein_projector = LargeProteinProjector(self.target_dim, self.latent_dim, self.activation, self.args.num_heads_agg, attn_drop=dropout, proj_drop=dropout)
-
+        
         self.target_projector = nn.Sequential(
             protein_projector,
             self.activation()
@@ -126,22 +128,21 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
 
         self.CEWeight = 1 if 'CEWeight' not in args else args.CEWeight
                     
-
+        self.fusion_layer = BiIntention(self.target_dim, layer=1, num_head=8, device='cuda')
+        self.sigmoid_scalar = nn.Parameter(torch.tensor(5.0))
+        
+        self.transformer_encoder = nn.TransformerEncoderLayer(d_model=2*self.target_dim, nhead=8, batch_first=True)
+        self.transformer_mlp = nn.Linear(2 * self.target_dim, 1)
         self.save_hyperparameters()
 
-        self.val_step_outputs  = []
-        self.val_step_targets  = []
+        self.val_step_outputs = []
+        self.val_step_targets = []
         self.test_step_outputs = []
         self.test_step_targets = []
-        
-        self.drug_features_before_coembedding    = []
-        self.protein_features_before_coembedding = []
-        self.drug_features_after_coembedding     = []
-        self.protein_features_after_coembedding  = []
 
     def forward(self, drug, target):
         model_size = self.args.model_size
-        sigmoid_scalar = self.args.sigmoid_scalar
+        ##### sigmoid_scalar = self.args.sigmoid_scalar
 
         drug_projection = self.drug_projector(drug)
 
@@ -152,14 +153,52 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         target_projection = self.target_projector(target)
 
         if self.classify:
-            similarity = sigmoid_scalar * F.cosine_similarity(
+            #print(f"151, model, drug_projection.shape : {drug_projection.shape}, target_projection.shape : {target_projection.shape}")
+            _, drug_projection, target_projection, _ = self.fusion_layer(drug_projection.unsqueeze(1), target_projection.unsqueeze(1))
+            
+            ### Comment this when using Transformer encoder.
+            #drug_projection, target_projection = drug_projection.squeeze(1), target_projection.squeeze(1)
+            
+            #print(f"153, model, drug_projection.shape : {drug_projection.shape}, target_projection.shape : {target_projection.shape}")
+            #exit()
+            
+            # ORIGINAL
+            #similarity = sigmoid_scalar * F.cosine_similarity(
+            #    drug_projection, target_projection
+            #)
+            
+            #LEARNABLE coeff
+            """
+            similarity = self.sigmoid_scalar * F.cosine_similarity(
                 drug_projection, target_projection
             )
+            """
+            
+            #COEFF=1
+            """
+            similarity = 1 * F.cosine_similarity(
+                drug_projection, target_projection
+            )
+            """
+            
+            #TRANSFORMER ENCODER
+            
+            joint_embed = torch.cat([drug_projection, target_projection], dim = -1)            
+            similarity = self.transformer_mlp(self.transformer_encoder(joint_embed).squeeze()).squeeze()
+            
+            
+            #MLP
+            """
+            similarity = self.transformer_mlp(joint_embed.squeeze()).squeeze()
+            """
         else:
             similarity = torch.bmm(
                 drug_projection.view(-1, 1, self.latent_dim),
                 target_projection.view(-1, self.latent_dim, 1),
             ).squeeze()
+        
+        #print(160, f'model.py, similarity.shape : {similarity.shape},drug_projection.shape: {drug_projection.shape},target_projection.shape: {target_projection.shape}')
+        #exit()
 
         return drug_projection, target_projection, similarity
 
@@ -184,7 +223,7 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
     def contrastive_step(self, batch):
         anchor, positive, negative = batch
 
-        anchor_projection   = self.target_projector(anchor)
+        anchor_projection = self.target_projector(anchor)
         positive_projection = self.drug_projector(positive)
         negative_projection = self.drug_projector(negative)
 
@@ -195,8 +234,8 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
     def non_contrastive_step(self, batch, train=True):
         drug, protein, label = batch
         drug, protein, similarity = self.forward(drug, protein)
-        self.drug_features_after_coembedding.append(drug.detach().cpu().numpy())
-        self.protein_features_after_coembedding.append(protein.detach().cpu().numpy())
+
+
         if self.classify:
             similarity = torch.squeeze(self.sigmoid(similarity))
 
@@ -204,7 +243,7 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         infoloss = 0
         if self.InfoNCEWeight > 0:
             infoloss = self.InfoNCEWeight * self.infoNCE_loss_fct(drug, protein, label)
-        # print(f"Loss: {loss}, VICReg: {vicreg_loss}, InfoNCE: {infoloss if self.InfoNCEWeight > 0 else 0}")
+
         if train:
             return loss * self.CEWeight, infoloss
         else:
@@ -274,40 +313,17 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         self.val_step_targets.clear()
 
     def test_step(self, batch, batch_idx):
-        drug_embed_before, protein_embed_before, label = batch
-        
-        _,_, similarity = self.non_contrastive_step(batch, train=False)
-        
-        self.drug_features_before_coembedding.append(drug_embed_before.detach().cpu().numpy())
-        # print(protein_embed_before.shape)
-        # self.protein_features_before_coembedding.append(protein_embed_before)
-        
-        
+        _, _, label = batch
+        _, _, similarity = self.non_contrastive_step(batch, train=False)
+
         self.test_step_outputs.extend(similarity)
         self.test_step_targets.extend(label)
 
         return {"preds": similarity, "target": label}
 
     def on_test_epoch_end(self):
-        import pickle
         for name, metric in self.metrics.items():
             if self.classify:
-                # with open("biosnap_test_outputs.pkl", "wb") as f:
-                #     pickle.dump(torch.Tensor(self.test_step_outputs), f)
-                # with open("biosnap_test_targets.pkl", "wb") as f:
-                #     pickle.dump(torch.Tensor(self.test_step_targets), f)
-                with open("biosnape_drug_before.pkl", "wb") as f:
-                    pickle.dump(np.concatenate(self.drug_features_before_coembedding), f)
-                # with open("biosnap_protein_before.pkl", "wb") as f:
-                #     pickle.dump(torch.concatenate(self.protein_features_before_coembedding), f)
-                    
-                with open("biosnap_drug_after.pkl", "wb") as f:
-                    pickle.dump(np.concatenate(self.drug_features_after_coembedding), f)
-                with open("biosnap_protein_after.pkl", "wb") as f:
-                    pickle.dump(np.concatenate(self.protein_features_after_coembedding), f)
-                    
-                    
-                    
                 metric(torch.Tensor(self.test_step_outputs), torch.Tensor(self.test_step_targets).to(torch.int))
             else:
                 metric(torch.Tensor(self.test_step_outputs).cuda(), torch.Tensor(self.test_step_targets).to(torch.float).cuda())
@@ -325,6 +341,7 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         elif sample_type == "target":
             target_projection = self.target_projector(x)
             return target_projection
+
 
 def main():
     from featurizers import ProtBertFeaturizer

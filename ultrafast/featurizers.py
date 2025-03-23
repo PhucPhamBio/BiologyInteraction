@@ -475,42 +475,6 @@ class MorganFeaturizer(Featurizer):
             ]
             return torch.stack(all_feats, dim=0)
 
-class MolFormerFeaturizer(Featurizer):
-    def __init__(self, shape: int = 768, save_dir: Path = Path().absolute(), ext: str = "h5", batch_size: int = 32, n_jobs: int = -1):
-        super().__init__("MolFormer", shape, "drug", save_dir, ext, batch_size)
-        
-        self._device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-        self.tokenizer = AutoTokenizer.from_pretrained("ibm/MoLFormer-XL-both-10pct", deterministic_eval=True, trust_remote_code=True)
-        self.model = AutoModel.from_pretrained("ibm/MoLFormer-XL-both-10pct", trust_remote_code=True).to(self._device)
-        self.model.eval()
-
-    def _transform_single(self, smile: str) -> torch.Tensor:
-        try:
-            inputs = self.tokenizer(smile, return_tensors="pt", padding=True, truncation=True).to(self._device)
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-            return outputs.last_hidden_state.mean(dim=1).cpu().squeeze()
-        except Exception as e:
-            print(f"Error featurizing SMILES {smile}: {e}")
-            return torch.zeros(self.shape)
-
-    def _transform(self, batch_smiles: list) -> torch.Tensor:
-        try:
-            inputs = self.tokenizer(batch_smiles, return_tensors="pt", padding=True, truncation=True).to(self._device)
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-            return outputs.last_hidden_state.mean(dim=1).cpu()
-        except RuntimeError as e:
-            if "CUDA out of memory" in str(e):
-                print("CUDA OOM during batch processing. Falling back to sequential processing.")
-                return torch.stack([self._transform_single(smile) for smile in batch_smiles])
-            else:
-                raise e
-        except Exception as e:
-            print(f"Error during batch featurization: {e}")
-            return torch.stack([self._transform_single(smile) for smile in batch_smiles])
-        
-
 class ProtBertFeaturizer(Featurizer):
     def __init__(self, save_dir: Path = Path().absolute(), per_tok=False, **kwargs):
         super().__init__("ProtBert", 1024, "target", save_dir, **kwargs)

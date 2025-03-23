@@ -30,7 +30,6 @@ dependencies = [
 
 [project.scripts]
 ultrafast-train = "ultrafast.train:train_cli"
-ultrafast-test = "ultrafast.train:test_cli"
 ultrafast-embed = "ultrafast.embed:embed_cli"
 ultrafast-store = "ultrafast.store:store_cli"
 ultrafast-report = "ultrafast.report:report_cli"

@@ -1,7 +1,5 @@
 import torch
 from torch import nn
-import torch.nn.functional as F
-from torch import nn, optim
 
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout = 0.):
@@ -59,6 +57,7 @@ class Transformer(nn.Module):
     def forward(self, x):
         for attn, ff in self.layers:
             # import pdb; pdb.set_trace()
+            #print(f"60, modules, x.shape : {x.shape}, attn(x).shape : {attn(x).shape}")
             x = attn(x) + x
             x = ff(x) + x
 
@@ -83,7 +82,9 @@ class TargetEmbedding(nn.Module):
         # cls_tokens = repeat(self.cls_token, '1 1 d -> b 1 d', b = b)
         cls_tokens = self.cls_token.repeat(b, 1, 1)
         x = torch.cat((cls_tokens, x), dim=1)
+        #print(f'84, modules, x.shape : {x.shape}')
         x = self.transformer(x)
+        #print(f'86, modules, x.shape : {x.shape}')
         return x[:,0] if self.out_type == "cls" else x[:,1:].mean(dim=1)
 
 # from https://github.com/facebookresearch/deit/blob/main/patchconvnet_models.py
@@ -117,35 +118,21 @@ class Learned_Aggregation_Layer(nn.Module):
             x = x.unsqueeze(0)
         B, N, C = x.shape
         cls_tokens = self.cls_token.repeat(B, 1, 1)
-        q = self.q(cls_tokens).reshape(B, 1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        q = self.q(cls_tokens).reshape(B, 1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3) # b, num_heads, 1, head_dim
         k = self.k(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
 
         q = q * self.scale
-        v = self.v(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        v = self.v(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3) #b, num_heads, n, head_dim 
 
-        attn = q @ k.transpose(-2, -1)
+        attn = q @ k.transpose(-2, -1) # b, num_heads, 1, head_dim @ b, num_heads, head_dim, N => b, num_heads, 1, N
         attn = self.id(attn)
-        attn = attn.softmax(dim=-1)
+        attn = attn.softmax(dim=-1) # bs, num_heads, 1, N
         attn = self.attn_drop(attn)
 
         x_cls = (attn @ v).transpose(1, 2).reshape(B, 1, C)
         x_cls = self.proj(x_cls)
         x_cls = self.proj_drop(x_cls)
-        import pickle 
-        file_path = 'biosnap_protein_after_agg.pkl'
-        try:
-            with open(file_path, "rb") as f:
-                data_list = pickle.load(f)  # Đọc danh sách cũ
-        except (FileNotFoundError, EOFError):
-            data_list = []  # Nếu file chưa tồn tại hoặc rỗng, tạo danh sách mới
 
-        # Thêm mảng mới vào danh sách
-        data_list.append(x_cls.detach().cpu().numpy())
-
-        # Ghi lại danh sách vào file
-        with open(file_path, "wb") as f:
-            pickle.dump(data_list, f)
-        print(len(data_list))
         return x_cls.squeeze()
 
 class AverageNonZeroVectors(nn.Module):
@@ -220,39 +207,3 @@ class LargeDrugProjector(nn.Module):
 
         return x
 
-# ====================== Self supervised ============================
-
-class VICReg(nn.Module):
-    def forward(self, x, y):
-        
-        batch_size = x.size(0)
-        feature_dim = x.size(1)
-        repr_loss = F.mse_loss(x, y)
-        x = x - x.mean(dim=0)
-        y = y - y.mean(dim=0)
-
-        std_x = torch.sqrt(x.var(dim=0) + 0.0001)
-        std_y = torch.sqrt(y.var(dim=0) + 0.0001)
-        std_loss = torch.mean(F.relu(1 - std_x)) / 2 + torch.mean(F.relu(1 - std_y)) / 2
-
-        cov_x = (x.T @ x) / (batch_size - 1)
-        cov_y = (y.T @ y) / (batch_size - 1)
-        cov_loss = off_diagonal(cov_x).pow_(2).sum().div(
-            feature_dim
-        ) + off_diagonal(cov_y).pow_(2).sum().div(feature_dim)
-        self.sim_coeff = 0.5
-        self.std_coeff = 0.3
-        self.cov_coeff = 0.3
-        loss = (
-            self.sim_coeff * repr_loss
-            + self.std_coeff * std_loss
-            + self.cov_coeff * cov_loss
-        )
-        return loss
-
-
-
-def off_diagonal(x):
-    n, m = x.shape
-    assert n == m
-    return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
