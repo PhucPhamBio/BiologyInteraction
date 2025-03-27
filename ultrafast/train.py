@@ -266,6 +266,7 @@ def train(
                 args=config
             )
         else:
+            drug_featurizer._features.clear()
             print("Initializing new model")
             print(f"257, target_featurizer.shape : {target_featurizer.shape}, drug_featurizer.shape : {drug_featurizer.shape}")
             #exit()
