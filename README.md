@@ -7,5 +7,7 @@ Ignore folder:
 + wandb
 + *pt
 + *pkl
+
 **Run Davis:**
+  
 bash run_davis.sh
