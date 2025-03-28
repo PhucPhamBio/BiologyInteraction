@@ -30,8 +30,7 @@ from ultrafast.datamodules import (
 from ultrafast.model import DrugTargetCoembeddingLightning
 from ultrafast.drug_only_model import DrugOnlyLightning
 from ultrafast.utils import get_featurizer, xavier_normal
-# import pdb 
-# pdb.set_trace()
+
 class PCBAEvaluationCallback(Callback):
     def on_validation_epoch_end(self, trainer, pl_module):
         eval_pcba(trainer, pl_module)
@@ -212,11 +211,10 @@ def train(
     # Load data
     print("Preparing DataModule")
     task_dir = get_task_dir(config.task)
-
+    print(config.drug_featurizer, config.target_featurizer)
     drug_featurizer = get_featurizer(config.drug_featurizer, save_dir=task_dir, n_jobs=config.num_workers)
 
     target_featurizer = get_featurizer(config.target_featurizer, save_dir=task_dir)
-
     # Set up task dm arguments
     if config.task == 'dti_dg':
         config.classify = False

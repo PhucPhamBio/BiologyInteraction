@@ -1,7 +1,7 @@
 task: davis
 contrastive: False
 InfoNCEWeight: 0.05
-drug_featurizer: MolFormerFeaturizer
+drug_featurizer: MorganGraphFeaturizer
 target_featurizer: SaProtFeaturizer
 latent_dimension: 1024
 model_size: "small"

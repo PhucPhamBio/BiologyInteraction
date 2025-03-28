@@ -4,3 +4,5 @@ best_models/
 checkpoints/
 examples/
 wandb/
+*.pt
+*.pkl

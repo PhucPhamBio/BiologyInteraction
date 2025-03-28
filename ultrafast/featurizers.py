@@ -25,6 +25,12 @@ from rdkit.Chem.rdmolops import RDKFingerprint
 from rdkit.Chem import rdFingerprintGenerator
 from ultrafast.utils import canonicalize
 from ultrafast.saprot_utils import load_esm_saprot
+from torch_geometric.graphgym.models import AtomEncoder, BondEncoder
+from torch import nn
+import torch.nn.functional as F
+from torch_geometric.data import Data
+from torch_geometric.nn import GATConv, global_mean_pool
+from ogb.utils.mol import smiles2graph
 
 def sanitize_string(s):
     if isinstance(s, str):
@@ -418,6 +424,105 @@ class ChemGPTFeaturizer(Featurizer):
             print(f"Error during batch featurization: {e}")
             return torch.stack([self._transform_single(smile) for smile in batch_smiles])
 
+class LigandGraphEncoder(nn.Module):
+    def __init__(self, emb_dim = 32, hidden_dim = 128, num_layer = 3):
+        super().__init__()
+        self.atom_encoder = AtomEncoder(emb_dim)
+        self.bond_encoder = BondEncoder(emb_dim)
+        self.convs = nn.ModuleList()
+        self.norms = nn.ModuleList()
+        self.num_layer = num_layer
+        for i in range(self.num_layer):
+            if i == 0:
+                node_fdim = emb_dim
+            else:
+                node_fdim = hidden_dim
+            self.convs.append(GATConv(
+                in_channels = node_fdim, out_channels = hidden_dim, 
+                heads = 4, concat = False, dropout = 0.1, edge_dim = emb_dim
+            ))
+            self.norms.append(
+                nn.LayerNorm(hidden_dim)
+            )
+
+    def forward(self, lig_graph):
+        lig_graph = self.atom_encoder(lig_graph)
+        lig_graph = self.bond_encoder(lig_graph)
+        x = lig_graph.x
+        for i in range(self.num_layer):
+            x = self.convs[i](x, lig_graph.edge_index, lig_graph.edge_attr)
+            x = self.norms[i](x)
+            x = F.relu(x)
+        return global_mean_pool(x, lig_graph.batch)
+    
+class MorganGraphFeaturizer(Featurizer):
+    def __init__(
+        self,
+        shape: int = 2048,
+        radius: int = 2,
+        save_dir: Path = Path().absolute(),
+        ext: str = "h5",
+        batch_size: int = 2048,
+        n_jobs: int = -1,
+        **kwargs
+    ):
+        total_shape = shape + shape // 2
+        super().__init__("Morgan_Graph", total_shape, "drug", save_dir, ext, batch_size, **kwargs)
+        self._device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        self._radius = radius
+        self.ligand_graph_encoder = LigandGraphEncoder(shape//4, shape//2, 3).to(self._device)
+        self.n_jobs = n_jobs if n_jobs > 0 else multiprocessing.cpu_count()
+        print(f"Setup morgan featurizer with {self.n_jobs} workers")
+
+    def smiles_to_morgan(self, smile: str):
+        if not isinstance(smile, str):
+            if pd.isna(smile):
+                print(f"Invalid SMILES: NaN")
+                return np.zeros((self.shape,))
+            else:
+                smile = str(smile)
+        fpgen = rdFingerprintGenerator.GetMorganGenerator(radius=self._radius, fpSize=self.shape)
+        try:
+            smile = canonicalize(smile)
+            mol = Chem.MolFromSmiles(smile)
+            features_vec = fpgen.GetFingerprint(mol)
+            features = np.zeros((1,))
+            DataStructs.ConvertToNumpyArray(features_vec, features)
+        except Exception as e:
+            print(f"rdkit not found this smiles for morgan: {smile} convert to all 0 features")
+            print(e)
+            features = np.zeros((self.shape,))
+        return features
+
+    def drug_substructure_from_smiles(self, smile: str):
+        try:
+            graph = smiles2graph(smile)
+            graph_drug = Data(
+                x=torch.tensor(graph['node_feat']),
+                edge_index=torch.tensor(graph['edge_index']),
+                edge_attr=torch.tensor(graph['edge_feat'])
+            ).to(self._device)
+        except Exception as e:
+            print(f"Failed to process SMILES for substructure: {smile}, returning zeros")
+            return torch.zeros(self.shape//2)
+        graph_drug.batch = torch.zeros(graph_drug.x.size(0), dtype=torch.long).to(self._device)
+        drug_structure_representation = self.ligand_graph_encoder(graph_drug)
+        return drug_structure_representation
+
+    def _transform(self, batch_smiles: List[str]) -> torch.Tensor:
+        morgan_feats = []
+        graph_feats  = []
+        for smiles in batch_smiles:
+            morgan_feats.append(self.smiles_to_morgan(smiles))
+            graph_feats.append(self.drug_substructure_from_smiles(smiles).detach().cpu())
+        morgan_feats = torch.tensor(morgan_feats)
+        graph_feats  = torch.concatenate(graph_feats)
+        all_feat = torch.cat([morgan_feats, graph_feats], dim=-1)
+        print(all_feat.shape)
+        return all_feat
+        
+        
+        
 class MorganFeaturizer(Featurizer):
     def __init__(
         self,
