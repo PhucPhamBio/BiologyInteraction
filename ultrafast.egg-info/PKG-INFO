@@ -1,4 +1,4 @@
-Metadata-Version: 2.2
+Metadata-Version: 2.4
 Name: ultrafast
 Version: 0.1.0
 Summary: Ultra-high-throughput Virtual Screening
@@ -20,3 +20,4 @@ Requires-Dist: transformers==4.43.4
 Requires-Dist: chromadb==0.5.5
 Requires-Dist: gdown==5.2.0
 Requires-Dist: ml-pyxis@ git+https://github.com/vicolab/ml-pyxis.git@master
+Dynamic: license-file

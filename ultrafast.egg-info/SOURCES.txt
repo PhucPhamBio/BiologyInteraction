@@ -2,6 +2,7 @@ LICENSE
 README.md
 pyproject.toml
 ultrafast/__init__.py
+ultrafast/bi_intention.py
 ultrafast/callbacks.py
 ultrafast/compute_topk.py
 ultrafast/contrastive_loss.py

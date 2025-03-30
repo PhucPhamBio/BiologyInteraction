@@ -7,13 +7,15 @@ from torch import nn
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.loggers import WandbLogger
-
+from lightning.pytorch.plugins.environments import LightningEnvironment
 import wandb
 from omegaconf import OmegaConf
 from pathlib import Path
 
 import argparse
-
+# Unset SLURM-related environment variables
+for var in ["SLURM_JOB_ID", "SLURM_NTASKS", "SLURM_NODELIST", "SLURM_PROCID"]:
+    os.environ.pop(var, None)
 from ultrafast.callbacks import eval_pcba
 from ultrafast.datamodules import (
     get_task_dir,
@@ -22,8 +24,9 @@ from ultrafast.datamodules import (
     DUDEDataModule,
     EnzPredDataModule,
     CombinedDataModule,
-    MergedDataModule
+    MergedDataModule,
 )
+
 from ultrafast.model import DrugTargetCoembeddingLightning
 from ultrafast.drug_only_model import DrugOnlyLightning
 from ultrafast.utils import get_featurizer, xavier_normal
@@ -32,12 +35,11 @@ from ultrafast.utils import get_featurizer, xavier_normal
 # ultrafast-train --exp-id DAVIS --config configs/saprot_agg_config.yaml
 # ultrafast-train --exp-id DAVIS --config configs/saprot_agg_config.yaml --ntasks-per-node=4
 
-"""
 class PCBAEvaluationCallback(Callback):
     def on_validation_epoch_end(self, trainer, pl_module):
         eval_pcba(trainer, pl_module)
-"""
 
+"""
 class PCBAEvaluationCallback(Callback):
     def __init__(self, eval_interval=20):
         super().__init__()
@@ -47,6 +49,7 @@ class PCBAEvaluationCallback(Callback):
         # Only evaluate every `eval_interval` epochs
         if (trainer.current_epoch + 1) % self.eval_interval == 0:
             eval_pcba(trainer, pl_module)
+"""
             
 def train_cli():
     parser = argparse.ArgumentParser(description="PLM_DTI Training.")
@@ -266,7 +269,7 @@ def train(
                 args=config
             )
         else:
-            drug_featurizer._features.clear()
+            #drug_featurizer._features.clear()
             print("Initializing new model")
             print(f"257, target_featurizer.shape : {target_featurizer.shape}, drug_featurizer.shape : {drug_featurizer.shape}")
             #exit()
@@ -337,7 +340,7 @@ def train(
         )
 
     if not config.no_wandb:
-        wandb_logger = WandbLogger(project=config.wandb_proj, name=f"{config.experiment_id}_{config.task}", log_model=False)
+        wandb_logger = WandbLogger(project=config.wandb_proj, name=f"drug_substructure_i-ngnndti_{config.task}", log_model=False)
         wandb_logger.watch(model)
         if hasattr(wandb_logger.experiment.config, 'update'):
             wandb_logger.experiment.config.update(OmegaConf.to_container(config, resolve=True, throw_on_missing=True))

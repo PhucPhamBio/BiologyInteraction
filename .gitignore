@@ -5,3 +5,7 @@ checkpoints/
 examples/
 wandb/
 SaProt_650M_AF2.pt
+
+wandb/
+*.pt
+*.pkl

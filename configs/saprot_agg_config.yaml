@@ -2,7 +2,8 @@ task: davis
 contrastive: False
 InfoNCEWeight: 0.0
 
-drug_featurizer: MorganFeaturizer
+#drug_featurizer: MorganFeaturizer
+drug_featurizer: MorganGraphFeaturizer
 target_featurizer: SaProtFeaturizer
 latent_dimension: 1280 # for transformer only; should be 1024 for others
 model_size: "small"
@@ -23,7 +24,7 @@ lr_t0: 10
 weight_decay: 0
 
 replicate: 0
-experiment_id : davis_trans_fused_trans
+experiment_id : aug_drug_sub_4096
 
 wandb_proj: ConPlexTrain
 model_save_dir: ./best_models/davis_trans_fused_trans

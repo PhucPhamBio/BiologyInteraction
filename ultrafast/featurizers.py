@@ -456,7 +456,7 @@ class LigandGraphEncoder(nn.Module):
             x = F.relu(x)
         return global_mean_pool(x, lig_graph.batch)
     
-class MorganFeaturizer(Featurizer):
+class MorganGraphFeaturizer(Featurizer):
     def __init__(
         self,
         shape: int = 2048,
@@ -467,10 +467,13 @@ class MorganFeaturizer(Featurizer):
         n_jobs: int = -1,
         **kwargs
     ):
-        total_shape = shape + shape // 2
-        super().__init__("Morgan", total_shape, "drug", save_dir, ext, batch_size, **kwargs)
+        self.morgan_shape = shape
+        self.drug_substructure_shape = shape // 2
+        total_shape = self.morgan_shape + self.drug_substructure_shape
+        super().__init__("Morgan_Graph", total_shape, "drug", save_dir, ext, batch_size, **kwargs)
+        self._device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
         self._radius = radius
-        self.ligand_graph_encoder = LigandGraphEncoder(shape//4, shape//2, 3)
+        self.ligand_graph_encoder = LigandGraphEncoder(shape//4, shape//2, 3).to(self._device)
         self.n_jobs = n_jobs if n_jobs > 0 else multiprocessing.cpu_count()
         print(f"Setup morgan featurizer with {self.n_jobs} workers")
 
@@ -481,7 +484,81 @@ class MorganFeaturizer(Featurizer):
                 return np.zeros((self.shape,))
             else:
                 smile = str(smile)
-        fpgen = rdFingerprintGenerator.GetMorganGenerator(radius=self._radius, fpSize=self.shape)
+        fpgen = rdFingerprintGenerator.GetMorganGenerator(radius=self._radius, fpSize=self.morgan_shape)
+        try:
+            smile = canonicalize(smile)
+            mol = Chem.MolFromSmiles(smile)
+            features_vec = fpgen.GetFingerprint(mol)
+            features = np.zeros((1,))
+            DataStructs.ConvertToNumpyArray(features_vec, features)
+        except Exception as e:
+            print(f"rdkit not found this smiles for morgan: {smile} convert to all 0 features")
+            print(e)
+            features = np.zeros((self.morgan_shape,))
+        return features
+
+    def drug_substructure_from_smiles(self, smile: str):
+        try:
+            graph = smiles2graph(smile)
+            graph_drug = Data(
+                x=torch.tensor(graph['node_feat']),
+                edge_index=torch.tensor(graph['edge_index']),
+                edge_attr=torch.tensor(graph['edge_feat'])
+            ).to(self._device)
+        except Exception as e:
+            print(f"Failed to process SMILES for substructure: {smile}, returning zeros")
+            return torch.zeros(self.drug_substructure_shape)
+        graph_drug.batch = torch.zeros(graph_drug.x.size(0), dtype=torch.long).to(self._device)
+        drug_structure_representation = self.ligand_graph_encoder(graph_drug)
+        return drug_structure_representation
+
+    def _transform(self, batch_smiles: List[str]) -> torch.Tensor:
+        morgan_feats = []
+        graph_feats  = []
+        for smiles in batch_smiles:
+            morgan_feats.append(self.smiles_to_morgan(smiles))
+            graph_feats.append(self.drug_substructure_from_smiles(smiles).detach().cpu())
+        morgan_feats = torch.tensor(morgan_feats)
+        graph_feats  = torch.concatenate(graph_feats)
+        all_feat = torch.cat([morgan_feats, graph_feats], dim=-1)
+        print(all_feat.shape)
+        return all_feat
+           
+    
+class MorganFeaturizer_Old(Featurizer):
+    def __init__(
+        self,
+        shape: int = 2048,
+        radius: int = 2,
+        save_dir: Path = Path().absolute(),
+        ext: str = "h5",
+        batch_size: int = 2048,
+        n_jobs: int = -1,
+        **kwargs
+    ):
+        super().__init__("Morgan", shape, "drug", save_dir, ext, batch_size, **kwargs)
+
+        self._radius = radius
+        # number of CPU workers to convert molecules to morgan fingerprints
+        self.n_jobs = n_jobs if n_jobs > 0 else multiprocessing.cpu_count()
+        print(f"Setup morgan featurizer with {self.n_jobs} workers")
+
+    def smiles_to_morgan(self, smile: str):
+        """
+        Convert smiles into Morgan Fingerprint.
+        :param smile: SMILES string
+        :type smile: str
+        :return: Morgan fingerprint
+        :rtype: np.ndarray
+        """
+        if not isinstance(smile, str):
+            if pd.isna(smile):
+                print(f"Invalid SMILES: NaN")
+                return np.zeros((self.shape,))
+            else:
+                smile = str(smile)
+
+        fpgen = rdFingerprintGenerator.GetMorganGenerator(radius=self._radius,fpSize=self.shape)
         try:
             smile = canonicalize(smile)
             mol = Chem.MolFromSmiles(smile)
@@ -494,43 +571,16 @@ class MorganFeaturizer(Featurizer):
             features = np.zeros((self.shape,))
         return features
 
-    def drug_substructure_from_smiles(self, smile: str):
-        try:
-            graph = smiles2graph(smile)
-            graph_drug = Data(
-                x=torch.tensor(graph['node_feat']),
-                edge_index=torch.tensor(graph['edge_index']),
-                edge_attr=torch.tensor(graph['edge_feat'])
-            )
-        except Exception as e:
-            print(f"Failed to process SMILES for substructure: {smile}, returning zeros")
-            return torch.zeros(self.shape//2)
-        graph_drug.batch = torch.zeros(graph_drug.x.size(0), dtype=torch.long)
-        drug_structure_representation = self.ligand_graph_encoder(graph_drug)
-        return drug_structure_representation
-
     def _transform(self, batch_smiles: List[str]) -> torch.Tensor:
         with multiprocessing.Pool(processes=self.n_jobs) as pool:
             smiles_to_morgan_partial = partial(self.smiles_to_morgan)
-            smiles_substructure_partial = partial(self.drug_substructure_from_smiles)
-            
             all_feats = pool.map(smiles_to_morgan_partial, batch_smiles)
-            substructure_feats = pool.map(smiles_substructure_partial, batch_smiles)
+
             all_feats = [
-                torch.from_numpy(feat).squeeze().float() if feat.shape[0] == self.shape
-                else torch.zeros(self.shape) for feat in all_feats
+                torch.from_numpy(feat).squeeze().float() if feat.shape[0] == self.shape \
+                        else torch.zeros(self.shape) for feat in all_feats
             ]
-            substructure_feats = [
-                feat.squeeze().float() if feat.shape[0] == self.shape//2
-                else torch.zeros(self.shape//2) for feat in substructure_feats
-            ]
-            all_feats = torch.stack(all_feats, dim=0)
-            substructure_feats = torch.stack(substructure_feats, dim=0)
-            combined_feats = torch.cat([all_feats, substructure_feats], dim=-1)
-            print(f"Combined feats shape: {combined_feats.shape}")  # Debug print
-            return combined_feats
-        
-    
+            return torch.stack(all_feats, dim=0)
 
 class ProtBertFeaturizer(Featurizer):
     def __init__(self, save_dir: Path = Path().absolute(), per_tok=False, **kwargs):

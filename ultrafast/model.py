@@ -44,7 +44,7 @@ class FocalLoss(nn.Module):
 class DrugTargetCoembeddingLightning(pl.LightningModule):
     def __init__(
         self,
-        drug_dim=2048,
+        drug_dim=3072,
         target_dim=100,
         latent_dim=1024,
         activation=nn.LeakyReLU,
@@ -69,7 +69,8 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         self.args = args
 
         self.drug_projector = nn.Sequential(
-            nn.Linear(self.drug_dim, self.latent_dim), self.activation()
+            nn.Linear(self.drug_dim, 2 * self.latent_dim), self.activation(),
+            nn.Linear(2 * self.latent_dim, self.latent_dim), self.activation() # when drug dim = 4096
         )
         nn.init.xavier_normal_(self.drug_projector[0].weight)
 
@@ -142,8 +143,8 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
 
     def forward(self, drug, target):
         model_size = self.args.model_size
-        ##### sigmoid_scalar = self.args.sigmoid_scalar
-
+        sigmoid_scalar = self.args.sigmoid_scalar
+        drug = drug.to(dtype=torch.float32) # convert from float64 to float32
         drug_projection = self.drug_projector(drug)
 
         # Add a batch dimension if it's missing
@@ -154,7 +155,7 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
 
         if self.classify:
             #print(f"151, model, drug_projection.shape : {drug_projection.shape}, target_projection.shape : {target_projection.shape}")
-            _, drug_projection, target_projection, _ = self.fusion_layer(drug_projection.unsqueeze(1), target_projection.unsqueeze(1))
+            #_, drug_projection, target_projection, _ = self.fusion_layer(drug_projection.unsqueeze(1), target_projection.unsqueeze(1))
             
             ### Comment this when using Transformer encoder.
             #drug_projection, target_projection = drug_projection.squeeze(1), target_projection.squeeze(1)
@@ -163,9 +164,9 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
             #exit()
             
             # ORIGINAL
-            #similarity = sigmoid_scalar * F.cosine_similarity(
-            #    drug_projection, target_projection
-            #)
+            similarity = sigmoid_scalar * F.cosine_similarity(
+                drug_projection, target_projection
+            )
             
             #LEARNABLE coeff
             """
@@ -183,8 +184,8 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
             
             #TRANSFORMER ENCODER
             
-            joint_embed = torch.cat([drug_projection, target_projection], dim = -1)            
-            similarity = self.transformer_mlp(self.transformer_encoder(joint_embed).squeeze()).squeeze()
+            # joint_embed = torch.cat([drug_projection, target_projection], dim = -1)            
+            # similarity = self.transformer_mlp(self.transformer_encoder(joint_embed).squeeze()).squeeze()
             
             
             #MLP
