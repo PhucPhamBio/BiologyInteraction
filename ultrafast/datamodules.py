@@ -76,15 +76,8 @@ def embed_collate_fn(args: T.Tuple[torch.Tensor, torch.Tensor], moltype="target"
 
     return mols
 
+"""
 def drug_target_collate_fn(args: T.Tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
-    """
-    Collate function for PyTorch data loader -- turn a batch of triplets into a triplet of batches
-
-    :param args: Batch of training samples with molecule, protein, and affinity
-    :type args: Iterable[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
-    :return: Create a batch of examples
-    :rtype: T.Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-    """
     d_emb = [a[0] for a in args]
     t_emb = [a[1] for a in args]
     labs = [a[2] for a in args]
@@ -94,6 +87,28 @@ def drug_target_collate_fn(args: T.Tuple[torch.Tensor, torch.Tensor, torch.Tenso
     labels = torch.stack(labs, 0)
 
     return drugs, targets, labels
+"""
+
+def drug_target_collate_fn(args: T.Tuple[torch.Tensor, torch.Tensor, torch.Tensor, str, str]):
+    """
+    Collate function for PyTorch data loader -- turn a batch of 5-tuples into a 5-tuple of batches.
+
+    :param args: Batch of training samples with molecule features, protein features, affinity, drug SMILES, and target sequence.
+    :type args: Iterable[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, str, str]]
+    :return: Batched drugs, targets, labels, drug SMILES list, and target sequence list.
+    :rtype: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, list, list]
+    """
+    d_emb = [a[0] for a in args]  # Drug features (tensors)
+    t_emb = [a[1] for a in args]  # Target features (tensors)
+    labs = [a[2] for a in args]   # Labels (tensors)
+    drug_smiles = [a[3] for a in args]  # SMILES strings (list of str)
+    target_seqs = [a[4] for a in args]  # Target sequences (list of str)
+
+    drugs = torch.stack(d_emb, 0)  # [batch_size, drug_feature_dim]
+    targets = pad_sequence(t_emb, batch_first=True)  # [batch_size, max_target_len, target_feature_dim]
+    labels = torch.stack(labs, 0)  # [batch_size]
+
+    return drugs, targets, labels, drug_smiles, target_seqs
 
 def contrastive_collate_fn(args: T.Tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
     """
@@ -184,7 +199,7 @@ class BinaryDataset(Dataset):
         target = self.target_featurizer(self.targets.iloc[i])
         label = torch.tensor(self.labels.iloc[i], dtype=torch.float32)
 
-        return drug, target, label
+        return drug, target, label, self.drugs.iloc[i], self.targets.iloc[i]
 
 class ContrastiveDataset(Dataset):
     def __init__(

@@ -7,7 +7,7 @@ from ultrafast.modules import AverageNonZeroVectors, Learned_Aggregation_Layer, 
 
 import pytorch_lightning as pl
 import torchmetrics
-from ultrafast.bi_intention import BiIntention
+from ultrafast.drug_substructure import LigandGraphEncoder
 
 class FocalLoss(nn.Module):
     ### https://github.com/facebookresearch/fvcore/blob/main/fvcore/nn/focal_loss.py
@@ -69,10 +69,17 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         self.args = args
 
         self.drug_projector = nn.Sequential(
-            nn.Linear(self.drug_dim, 2 * self.latent_dim), self.activation(),
-            nn.Linear(2 * self.latent_dim, self.latent_dim), self.activation() # when drug dim = 4096
+            nn.Linear(self.drug_dim, self.latent_dim), self.activation(),
         )
+        
+        self.drug_graph_projector = nn.Sequential(
+            nn.Linear(self.drug_dim, self.latent_dim), self.activation(),
+        )
+        
+        self.molecule_graph_embed = LigandGraphEncoder(emb_dim=1024, hidden_dim=2048, num_layer=3, k_hop=2)
+        
         nn.init.xavier_normal_(self.drug_projector[0].weight)
+        nn.init.xavier_normal_(self.drug_graph_projector[0].weight)
 
         if prot_proj == "avg":
             protein_projector=nn.Sequential(AverageNonZeroVectors(), nn.Linear(self.target_dim, self.latent_dim))
@@ -129,11 +136,8 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
 
         self.CEWeight = 1 if 'CEWeight' not in args else args.CEWeight
                     
-        self.fusion_layer = BiIntention(self.target_dim, layer=1, num_head=8, device='cuda')
         self.sigmoid_scalar = nn.Parameter(torch.tensor(5.0))
         
-        self.transformer_encoder = nn.TransformerEncoderLayer(d_model=2*self.target_dim, nhead=8, batch_first=True)
-        self.transformer_mlp = nn.Linear(2 * self.target_dim, 1)
         self.save_hyperparameters()
 
         self.val_step_outputs = []
@@ -141,12 +145,12 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         self.test_step_outputs = []
         self.test_step_targets = []
 
-    def forward(self, drug, target):
+    def forward(self, drug, target, drug_smiles):
         model_size = self.args.model_size
         sigmoid_scalar = self.args.sigmoid_scalar
-        drug = drug.to(dtype=torch.float32) # convert from float64 to float32
+        drug = drug.to(dtype=torch.float32) #morgan representation.
         drug_projection = self.drug_projector(drug)
-
+        
         # Add a batch dimension if it's missing
         if target.dim() == 2:
             target = target.unsqueeze(0)
@@ -154,53 +158,15 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         target_projection = self.target_projector(target)
 
         if self.classify:
-            #print(f"151, model, drug_projection.shape : {drug_projection.shape}, target_projection.shape : {target_projection.shape}")
-            #_, drug_projection, target_projection, _ = self.fusion_layer(drug_projection.unsqueeze(1), target_projection.unsqueeze(1))
-            
-            ### Comment this when using Transformer encoder.
-            #drug_projection, target_projection = drug_projection.squeeze(1), target_projection.squeeze(1)
-            
-            #print(f"153, model, drug_projection.shape : {drug_projection.shape}, target_projection.shape : {target_projection.shape}")
-            #exit()
-            
-            # ORIGINAL
-            similarity = sigmoid_scalar * F.cosine_similarity(
-                drug_projection, target_projection
-            )
-            
-            #LEARNABLE coeff
-            """
-            similarity = self.sigmoid_scalar * F.cosine_similarity(
-                drug_projection, target_projection
-            )
-            """
-            
-            #COEFF=1
-            """
-            similarity = 1 * F.cosine_similarity(
-                drug_projection, target_projection
-            )
-            """
-            
-            #TRANSFORMER ENCODER
-            
-            # joint_embed = torch.cat([drug_projection, target_projection], dim = -1)            
-            # similarity = self.transformer_mlp(self.transformer_encoder(joint_embed).squeeze()).squeeze()
-            
-            
-            #MLP
-            """
-            similarity = self.transformer_mlp(joint_embed.squeeze()).squeeze()
-            """
+            drug_graph_representation = self.molecule_graph_embed(drug_smiles)
+            drug_graph_projection = self.drug_graph_projector(drug_graph_representation)
+            fused_similarity = (F.cosine_similarity(drug_projection, target_projection))*0.3 + (F.cosine_similarity(drug_graph_projection, target_projection))*0.7
+            similarity = sigmoid_scalar * fused_similarity
         else:
             similarity = torch.bmm(
                 drug_projection.view(-1, 1, self.latent_dim),
                 target_projection.view(-1, self.latent_dim, 1),
             ).squeeze()
-        
-        #print(160, f'model.py, similarity.shape : {similarity.shape},drug_projection.shape: {drug_projection.shape},target_projection.shape: {target_projection.shape}')
-        #exit()
-
         return drug_projection, target_projection, similarity
 
     def configure_optimizers(self):
@@ -233,8 +199,8 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         return loss
 
     def non_contrastive_step(self, batch, train=True):
-        drug, protein, label = batch
-        drug, protein, similarity = self.forward(drug, protein)
+        drug, protein, label, drug_smiles, _ = batch
+        drug, protein, similarity = self.forward(drug, protein, drug_smiles)
 
 
         if self.classify:
@@ -291,7 +257,7 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         if self.global_step == 0 and self.global_rank == 0 and not self.args.no_wandb:
             wandb.define_metric("val/aupr", summary="max")
-        _, _, label = batch
+        _, _, label, _, _ = batch
         loss, infoloss, similarity = self.non_contrastive_step(batch, train=False)
         self.log("val/loss", loss, sync_dist=True if self.trainer.num_devices > 1 else False)
         if self.InfoNCEWeight > 0:
@@ -314,7 +280,7 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         self.val_step_targets.clear()
 
     def test_step(self, batch, batch_idx):
-        _, _, label = batch
+        _, _, label, _, _ = batch
         _, _, similarity = self.non_contrastive_step(batch, train=False)
 
         self.test_step_outputs.extend(similarity)

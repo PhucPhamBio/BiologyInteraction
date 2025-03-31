@@ -424,37 +424,6 @@ class ChemGPTFeaturizer(Featurizer):
         except Exception as e:
             print(f"Error during batch featurization: {e}")
             return torch.stack([self._transform_single(smile) for smile in batch_smiles])
-
-class LigandGraphEncoder(nn.Module):
-    def __init__(self, emb_dim = 32, hidden_dim = 128, num_layer = 3):
-        super().__init__()
-        self.atom_encoder = AtomEncoder(emb_dim)
-        self.bond_encoder = BondEncoder(emb_dim)
-        self.convs = nn.ModuleList()
-        self.norms = nn.ModuleList()
-        self.num_layer = num_layer
-        for i in range(self.num_layer):
-            if i == 0:
-                node_fdim = emb_dim
-            else:
-                node_fdim = hidden_dim
-            self.convs.append(GATConv(
-                in_channels = node_fdim, out_channels = hidden_dim, 
-                heads = 4, concat = False, dropout = 0.1, edge_dim = emb_dim
-            ))
-            self.norms.append(
-                nn.LayerNorm(hidden_dim)
-            )
-
-    def forward(self, lig_graph):
-        lig_graph = self.atom_encoder(lig_graph)
-        lig_graph = self.bond_encoder(lig_graph)
-        x = lig_graph.x
-        for i in range(self.num_layer):
-            x = self.convs[i](x, lig_graph.edge_index, lig_graph.edge_attr)
-            x = self.norms[i](x)
-            x = F.relu(x)
-        return global_mean_pool(x, lig_graph.batch)
     
 class MorganGraphFeaturizer(Featurizer):
     def __init__(
@@ -468,12 +437,9 @@ class MorganGraphFeaturizer(Featurizer):
         **kwargs
     ):
         self.morgan_shape = shape
-        self.drug_substructure_shape = shape // 2
-        total_shape = self.morgan_shape + self.drug_substructure_shape
-        super().__init__("Morgan_Graph", total_shape, "drug", save_dir, ext, batch_size, **kwargs)
+        super().__init__("Morgan_Graph", shape, "drug", save_dir, ext, batch_size, **kwargs)
         self._device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
         self._radius = radius
-        self.ligand_graph_encoder = LigandGraphEncoder(shape//4, shape//2, 3).to(self._device)
         self.n_jobs = n_jobs if n_jobs > 0 else multiprocessing.cpu_count()
         print(f"Setup morgan featurizer with {self.n_jobs} workers")
 
@@ -497,32 +463,12 @@ class MorganGraphFeaturizer(Featurizer):
             features = np.zeros((self.morgan_shape,))
         return features
 
-    def drug_substructure_from_smiles(self, smile: str):
-        try:
-            graph = smiles2graph(smile)
-            graph_drug = Data(
-                x=torch.tensor(graph['node_feat']),
-                edge_index=torch.tensor(graph['edge_index']),
-                edge_attr=torch.tensor(graph['edge_feat'])
-            ).to(self._device)
-        except Exception as e:
-            print(f"Failed to process SMILES for substructure: {smile}, returning zeros")
-            return torch.zeros(self.drug_substructure_shape)
-        graph_drug.batch = torch.zeros(graph_drug.x.size(0), dtype=torch.long).to(self._device)
-        drug_structure_representation = self.ligand_graph_encoder(graph_drug)
-        return drug_structure_representation
-
     def _transform(self, batch_smiles: List[str]) -> torch.Tensor:
         morgan_feats = []
-        graph_feats  = []
         for smiles in batch_smiles:
             morgan_feats.append(self.smiles_to_morgan(smiles))
-            graph_feats.append(self.drug_substructure_from_smiles(smiles).detach().cpu())
         morgan_feats = torch.tensor(morgan_feats)
-        graph_feats  = torch.concatenate(graph_feats)
-        all_feat = torch.cat([morgan_feats, graph_feats], dim=-1)
-        print(all_feat.shape)
-        return all_feat
+        return morgan_feats
            
     
 class MorganFeaturizer_Old(Featurizer):
