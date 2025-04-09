@@ -8,6 +8,8 @@ from ultrafast.modules import AverageNonZeroVectors, Learned_Aggregation_Layer, 
 import pytorch_lightning as pl
 import torchmetrics
 from ultrafast.drug_substructure import LigandGraphEncoder
+from ultrafast.bindti import BINDTI_Sprint
+from ultrafast.bindti_big import BINDTI_big
 
 class FocalLoss(nn.Module):
     ### https://github.com/facebookresearch/fvcore/blob/main/fvcore/nn/focal_loss.py
@@ -44,7 +46,7 @@ class FocalLoss(nn.Module):
 class DrugTargetCoembeddingLightning(pl.LightningModule):
     def __init__(
         self,
-        drug_dim=3072,
+        drug_dim=2048,
         target_dim=100,
         latent_dim=1024,
         activation=nn.LeakyReLU,
@@ -72,20 +74,14 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
             nn.Linear(self.drug_dim, self.latent_dim), self.activation(),
         )
         
-        self.drug_graph_projector = nn.Sequential(
-            nn.Linear(self.drug_dim, self.latent_dim), self.activation(),
-        )
-        
-        self.molecule_graph_embed = LigandGraphEncoder(emb_dim=1024, hidden_dim=2048, num_layer=3, k_hop=2)
-        
         nn.init.xavier_normal_(self.drug_projector[0].weight)
-        nn.init.xavier_normal_(self.drug_graph_projector[0].weight)
 
         if prot_proj == "avg":
             protein_projector=nn.Sequential(AverageNonZeroVectors(), nn.Linear(self.target_dim, self.latent_dim))
         elif prot_proj == "transformer": # target dim = 1280, laten_dim = 1024
             protein_projector = TargetEmbedding( self.target_dim, self.latent_dim, self.args.num_layers_target, dropout=dropout, out_type=args.out_type)
         elif prot_proj == "agg":
+            print(83, f'model, self.target_dim : {self.target_dim}')
             protein_projector = nn.Sequential(Learned_Aggregation_Layer(self.target_dim, num_heads=self.args.num_heads_agg, attn_drop=dropout, proj_drop=dropout), nn.Linear(self.target_dim, self.latent_dim))
 
         if 'model_size' in args and args.model_size == "large":  # override the above settings and use a large model for drug and target
@@ -96,7 +92,17 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
             protein_projector,
             self.activation()
         )
-
+        
+        """
+        Simple integration of BINDTI
+        """
+        #self.bindti = BINDTI_Sprint(self.drug_dim, self.target_dim, 4, 1)
+        
+        """
+        Integration of BINDTI_big
+        """
+        self.bindti = BINDTI_big(self.drug_dim, self.target_dim, 4, 1)
+        
         if prot_proj == "avg":
             nn.init.xavier_normal_(self.target_projector[0][1].weight)
 
@@ -146,9 +152,10 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         self.test_step_targets = []
 
     def forward(self, drug, target, drug_smiles):
-        model_size = self.args.model_size
         sigmoid_scalar = self.args.sigmoid_scalar
         drug = drug.to(dtype=torch.float32) #morgan representation.
+        drug = drug.unsqueeze(1)
+        
         drug_projection = self.drug_projector(drug)
         
         # Add a batch dimension if it's missing
@@ -156,12 +163,25 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
             target = target.unsqueeze(0)
 
         target_projection = self.target_projector(target)
-
+        #print(157, f'model, drug.shape : {drug.shape}, target.shape : {target.shape}, target_projection.shape : {target_projection.shape}')
+        # drug.shape torch.Size([64, 1, 2048]), target.shape : torch.Size([64, 1023, 1280]), target_projection.shape : torch.Size([64, 1280])
         if self.classify:
-            drug_graph_representation = self.molecule_graph_embed(drug_smiles)
-            drug_graph_projection = self.drug_graph_projector(drug_graph_representation)
-            fused_similarity = (F.cosine_similarity(drug_projection, target_projection))*0.3 + (F.cosine_similarity(drug_graph_projection, target_projection))*0.7
-            similarity = sigmoid_scalar * fused_similarity
+            #fused_similarity = (F.cosine_similarity(drug_projection, target_projection))
+            #similarity = sigmoid_scalar * fused_similarity
+            
+            """
+            For the simple integration of BINDTI, we need this, but no need for the BINDTI_big.
+            """
+            #target = self.target_projector(target)
+            #target = target.unsqueeze(1)
+            #_, _, _, similarity, _ = self.bindti(drug, target)
+            
+            """
+            For the integration of BINDTI_big. 
+            """
+            drug = drug.squeeze()
+            _, _, _, similarity, _ = self.bindti(drug, target, drug_smiles)
+            
         else:
             similarity = torch.bmm(
                 drug_projection.view(-1, 1, self.latent_dim),

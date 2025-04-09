@@ -184,6 +184,7 @@ def train(
     drug_featurizer = get_featurizer(config.drug_featurizer, save_dir=task_dir, n_jobs=config.num_workers)
 
     target_featurizer = get_featurizer(config.target_featurizer, save_dir=task_dir)
+    #target_featurizer = get_featurizer(config.target_featurizer, save_dir=task_dir, shape = )
 
     # Set up task dm arguments
     if config.task == 'dti_dg':
@@ -340,7 +341,7 @@ def train(
         )
 
     if not config.no_wandb:
-        wandb_logger = WandbLogger(project=config.wandb_proj, name=f"03morgan_07sub_{config.task}", log_model=False)
+        wandb_logger = WandbLogger(project=config.wandb_proj, name=f"sprint_bindti_big_smaller_molecular", log_model=False)
         wandb_logger.watch(model)
         if hasattr(wandb_logger.experiment.config, 'update'):
             wandb_logger.experiment.config.update(OmegaConf.to_container(config, resolve=True, throw_on_missing=True))

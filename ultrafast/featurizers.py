@@ -721,6 +721,8 @@ class ESM2Featurizer(Featurizer):
 # SaProt Featurizer
 class SaProtFeaturizer(Featurizer):
     def __init__(self, shape: int = 1280, save_dir: Path = Path().absolute(), ext: str = "h5", batch_size: int = 16, **kwargs):
+    #def __init__(self, shape: int = 2048, save_dir: Path = Path().absolute(), ext: str = "h5", batch_size: int = 16, **kwargs):
+    
         super().__init__("SaProt", shape, "target", save_dir, ext, batch_size, **kwargs)
         
         # Load SaProt model
