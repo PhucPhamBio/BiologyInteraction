@@ -424,7 +424,8 @@ class ChemGPTFeaturizer(Featurizer):
         except Exception as e:
             print(f"Error during batch featurization: {e}")
             return torch.stack([self._transform_single(smile) for smile in batch_smiles])
-    
+
+"""    
 class MorganGraphFeaturizer(Featurizer):
     def __init__(
         self,
@@ -469,9 +470,9 @@ class MorganGraphFeaturizer(Featurizer):
             morgan_feats.append(self.smiles_to_morgan(smiles))
         morgan_feats = torch.tensor(morgan_feats)
         return morgan_feats
-           
+"""           
     
-class MorganFeaturizer_Old(Featurizer):
+class MorganFeaturizer(Featurizer):
     def __init__(
         self,
         shape: int = 2048,

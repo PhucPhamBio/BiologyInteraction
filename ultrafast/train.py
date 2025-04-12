@@ -341,7 +341,7 @@ def train(
         )
 
     if not config.no_wandb:
-        wandb_logger = WandbLogger(project=config.wandb_proj, name=f"sprint_bindti_big_smaller_molecular", log_model=False)
+        wandb_logger = WandbLogger(project=config.wandb_proj, name=f"original_scalar5", log_model=False)
         wandb_logger.watch(model)
         if hasattr(wandb_logger.experiment.config, 'update'):
             wandb_logger.experiment.config.update(OmegaConf.to_container(config, resolve=True, throw_on_missing=True))

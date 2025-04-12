@@ -90,7 +90,14 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         
         self.target_projector = nn.Sequential(
             protein_projector,
-            self.activation()
+            #self.activation()
+        )
+        
+        self.dense_predictor = nn.Sequential(
+            #nn.Linear(drug_dim, latent_dim),
+            nn.Linear(latent_dim, latent_dim),
+            nn.Dropout(p=0.2),
+            #self.activation()
         )
         
         """
@@ -101,7 +108,7 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         """
         Integration of BINDTI_big
         """
-        self.bindti = BINDTI_big(self.drug_dim, self.target_dim, 4, 1)
+        #self.bindti = BINDTI_big(self.drug_dim, self.target_dim, 4, 1)
         
         if prot_proj == "avg":
             nn.init.xavier_normal_(self.target_projector[0][1].weight)
@@ -154,7 +161,7 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
     def forward(self, drug, target, drug_smiles):
         sigmoid_scalar = self.args.sigmoid_scalar
         drug = drug.to(dtype=torch.float32) #morgan representation.
-        drug = drug.unsqueeze(1)
+        ##drug = drug.unsqueeze(1)
         
         drug_projection = self.drug_projector(drug)
         
@@ -166,8 +173,8 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         #print(157, f'model, drug.shape : {drug.shape}, target.shape : {target.shape}, target_projection.shape : {target_projection.shape}')
         # drug.shape torch.Size([64, 1, 2048]), target.shape : torch.Size([64, 1023, 1280]), target_projection.shape : torch.Size([64, 1280])
         if self.classify:
-            #fused_similarity = (F.cosine_similarity(drug_projection, target_projection))
-            #similarity = sigmoid_scalar * fused_similarity
+            fused_similarity = (F.cosine_similarity(drug_projection, target_projection))
+            similarity = sigmoid_scalar * fused_similarity
             
             """
             For the simple integration of BINDTI, we need this, but no need for the BINDTI_big.
@@ -179,9 +186,18 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
             """
             For the integration of BINDTI_big. 
             """
-            drug = drug.squeeze()
-            _, _, _, similarity, _ = self.bindti(drug, target, drug_smiles)
+            #drug = drug.squeeze()
+            #_, _, _, similarity, _ = self.bindti(drug, target, drug_smiles)
             
+            """
+            One dense projector similarity
+            """
+            ##target_projection = target_projection.unsqueeze(1).permute(0,2,1)
+            #latent_drug = self.dense_predictor(drug)
+            ##latent_drug = self.dense_predictor(drug_projection)
+            ##similarity = latent_drug @ target_projection
+            ##similarity = similarity.squeeze()
+            ##similarity = sigmoid_scalar * similarity
         else:
             similarity = torch.bmm(
                 drug_projection.view(-1, 1, self.latent_dim),
