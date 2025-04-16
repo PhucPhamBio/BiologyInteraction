@@ -25,13 +25,6 @@ from rdkit.Chem.rdmolops import RDKFingerprint
 from rdkit.Chem import rdFingerprintGenerator
 from ultrafast.utils import canonicalize
 from ultrafast.saprot_utils import load_esm_saprot
-from torch_geometric.graphgym.models import AtomEncoder, BondEncoder
-from torch import nn
-import torch.nn.functional as F
-from torch_geometric.data import Data
-from torch_geometric.nn import GATConv, global_mean_pool
-from ogb.utils.mol import smiles2graph
-
 
 def sanitize_string(s):
     if isinstance(s, str):
@@ -425,53 +418,6 @@ class ChemGPTFeaturizer(Featurizer):
             print(f"Error during batch featurization: {e}")
             return torch.stack([self._transform_single(smile) for smile in batch_smiles])
 
-"""    
-class MorganGraphFeaturizer(Featurizer):
-    def __init__(
-        self,
-        shape: int = 2048,
-        radius: int = 2,
-        save_dir: Path = Path().absolute(),
-        ext: str = "h5",
-        batch_size: int = 2048,
-        n_jobs: int = -1,
-        **kwargs
-    ):
-        self.morgan_shape = shape
-        super().__init__("Morgan_Graph", shape, "drug", save_dir, ext, batch_size, **kwargs)
-        self._device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
-        self._radius = radius
-        self.n_jobs = n_jobs if n_jobs > 0 else multiprocessing.cpu_count()
-        print(f"Setup morgan featurizer with {self.n_jobs} workers")
-
-    def smiles_to_morgan(self, smile: str):
-        if not isinstance(smile, str):
-            if pd.isna(smile):
-                print(f"Invalid SMILES: NaN")
-                return np.zeros((self.shape,))
-            else:
-                smile = str(smile)
-        fpgen = rdFingerprintGenerator.GetMorganGenerator(radius=self._radius, fpSize=self.morgan_shape)
-        try:
-            smile = canonicalize(smile)
-            mol = Chem.MolFromSmiles(smile)
-            features_vec = fpgen.GetFingerprint(mol)
-            features = np.zeros((1,))
-            DataStructs.ConvertToNumpyArray(features_vec, features)
-        except Exception as e:
-            print(f"rdkit not found this smiles for morgan: {smile} convert to all 0 features")
-            print(e)
-            features = np.zeros((self.morgan_shape,))
-        return features
-
-    def _transform(self, batch_smiles: List[str]) -> torch.Tensor:
-        morgan_feats = []
-        for smiles in batch_smiles:
-            morgan_feats.append(self.smiles_to_morgan(smiles))
-        morgan_feats = torch.tensor(morgan_feats)
-        return morgan_feats
-"""           
-    
 class MorganFeaturizer(Featurizer):
     def __init__(
         self,
@@ -528,6 +474,42 @@ class MorganFeaturizer(Featurizer):
                         else torch.zeros(self.shape) for feat in all_feats
             ]
             return torch.stack(all_feats, dim=0)
+
+class MolFormerFeaturizer(Featurizer):
+    def __init__(self, shape: int = 768, save_dir: Path = Path().absolute(), ext: str = "h5", batch_size: int = 32, n_jobs: int = -1):
+        super().__init__("MolFormer", shape, "drug", save_dir, ext, batch_size)
+        
+        self._device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self.tokenizer = AutoTokenizer.from_pretrained("ibm/MoLFormer-XL-both-10pct", deterministic_eval=True, trust_remote_code=True)
+        self.model = AutoModel.from_pretrained("ibm/MoLFormer-XL-both-10pct", trust_remote_code=True).to(self._device)
+        self.model.eval()
+
+    def _transform_single(self, smile: str) -> torch.Tensor:
+        try:
+            inputs = self.tokenizer(smile, return_tensors="pt", padding=True, truncation=True).to(self._device)
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+            return outputs.last_hidden_state.mean(dim=1).cpu().squeeze()
+        except Exception as e:
+            print(f"Error featurizing SMILES {smile}: {e}")
+            return torch.zeros(self.shape)
+
+    def _transform(self, batch_smiles: list) -> torch.Tensor:
+        try:
+            inputs = self.tokenizer(batch_smiles, return_tensors="pt", padding=True, truncation=True).to(self._device)
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+            return outputs.last_hidden_state.mean(dim=1).cpu()
+        except RuntimeError as e:
+            if "CUDA out of memory" in str(e):
+                print("CUDA OOM during batch processing. Falling back to sequential processing.")
+                return torch.stack([self._transform_single(smile) for smile in batch_smiles])
+            else:
+                raise e
+        except Exception as e:
+            print(f"Error during batch featurization: {e}")
+            return torch.stack([self._transform_single(smile) for smile in batch_smiles])
+        
 
 class ProtBertFeaturizer(Featurizer):
     def __init__(self, save_dir: Path = Path().absolute(), per_tok=False, **kwargs):
@@ -722,8 +704,6 @@ class ESM2Featurizer(Featurizer):
 # SaProt Featurizer
 class SaProtFeaturizer(Featurizer):
     def __init__(self, shape: int = 1280, save_dir: Path = Path().absolute(), ext: str = "h5", batch_size: int = 16, **kwargs):
-    #def __init__(self, shape: int = 2048, save_dir: Path = Path().absolute(), ext: str = "h5", batch_size: int = 16, **kwargs):
-    
         super().__init__("SaProt", shape, "target", save_dir, ext, batch_size, **kwargs)
         
         # Load SaProt model

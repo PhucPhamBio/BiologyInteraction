@@ -3,13 +3,10 @@ import wandb
 from torch import nn
 import torch.nn.functional as F
 from ultrafast.contrastive_loss import MarginScheduledLossFunction, InfoNCELoss
-from ultrafast.modules import AverageNonZeroVectors, Learned_Aggregation_Layer, TargetEmbedding, LargeDrugProjector, LargeProteinProjector, Transformer
-
+from ultrafast.modules import AverageNonZeroVectors, Learned_Aggregation_Layer, TargetEmbedding, LargeDrugProjector, LargeProteinProjector
+import numpy as np
 import pytorch_lightning as pl
 import torchmetrics
-from ultrafast.drug_substructure import LigandGraphEncoder
-from ultrafast.bindti import BINDTI_Sprint
-from ultrafast.bindti_big import BINDTI_big
 
 class FocalLoss(nn.Module):
     ### https://github.com/facebookresearch/fvcore/blob/main/fvcore/nn/focal_loss.py
@@ -43,6 +40,59 @@ class FocalLoss(nn.Module):
 
         return loss
 
+class SiameseNetwork(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.sim_mlp = nn.Sequential(
+            nn.Linear(4 * hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)  # Output is a scalar similarity
+        )
+
+    def forward(self, drug, protein):
+        # Shape: (bs, hidden_dim)
+        abs_diff = torch.abs(drug - protein)
+        prod = drug * protein
+        concat = torch.cat([drug, protein, abs_diff, prod], dim=-1)  # (bs, 4*hidden_dim)
+
+        similarity = self.sim_mlp(concat).squeeze(-1)  # (bs,)
+        return similarity
+
+class CrossAttentionSimilarity(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+
+        self.query_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.key_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.value_proj = nn.Linear(hidden_dim, hidden_dim)
+
+        self.sim_mlp = nn.Sequential(
+            nn.Linear(2 * hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+
+    def forward(self, drug, protein):
+        # Shape: (bs, hidden_dim)
+        Q = self.query_proj(drug)       # (bs, hidden_dim)
+        K = self.key_proj(protein)      # (bs, hidden_dim)
+        V = self.value_proj(protein)    # (bs, hidden_dim)
+
+        # Compute scaled dot-product attention score
+        attn_weights = torch.sum(Q * K, dim=-1, keepdim=True) / (self.hidden_dim ** 0.5)  # (bs, 1)
+        attn_weights = F.softmax(attn_weights, dim=1)  # optional, though here dim=1 with bs>1 is questionable
+
+        # Apply attention: weighted sum
+        attended = attn_weights * V  # (bs, hidden_dim)
+
+        # Combine drug with attended protein representation
+        combined = torch.cat([drug, attended], dim=-1)  # (bs, 2*hidden_dim)
+
+        similarity = self.sim_mlp(combined).squeeze(-1)  # (bs,)
+        return similarity
+
 class DrugTargetCoembeddingLightning(pl.LightningModule):
     def __init__(
         self,
@@ -59,7 +109,6 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         args=None,
     ):
         super().__init__()
-
         self.automatic_optimization = False # We will handle the optimization step ourselves
         self.drug_dim = drug_dim
         self.target_dim = target_dim
@@ -71,45 +120,35 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         self.args = args
 
         self.drug_projector = nn.Sequential(
-            nn.Linear(self.drug_dim, self.latent_dim), self.activation(),
+            nn.Linear(self.drug_dim, self.latent_dim), self.activation()
         )
-        
         nn.init.xavier_normal_(self.drug_projector[0].weight)
 
         if prot_proj == "avg":
             protein_projector=nn.Sequential(AverageNonZeroVectors(), nn.Linear(self.target_dim, self.latent_dim))
-        elif prot_proj == "transformer": # target dim = 1280, laten_dim = 1024
+        elif prot_proj == "transformer":
             protein_projector = TargetEmbedding( self.target_dim, self.latent_dim, self.args.num_layers_target, dropout=dropout, out_type=args.out_type)
         elif prot_proj == "agg":
-            print(83, f'model, self.target_dim : {self.target_dim}')
             protein_projector = nn.Sequential(Learned_Aggregation_Layer(self.target_dim, num_heads=self.args.num_heads_agg, attn_drop=dropout, proj_drop=dropout), nn.Linear(self.target_dim, self.latent_dim))
 
         if 'model_size' in args and args.model_size == "large":  # override the above settings and use a large model for drug and target
             self.drug_projector = LargeDrugProjector(self.drug_dim, self.latent_dim, self.activation, dropout)
             protein_projector = LargeProteinProjector(self.target_dim, self.latent_dim, self.activation, self.args.num_heads_agg, attn_drop=dropout, proj_drop=dropout)
-        
+
         self.target_projector = nn.Sequential(
             protein_projector,
-            #self.activation()
+            self.activation()
         )
-        
-        self.dense_predictor = nn.Sequential(
-            #nn.Linear(drug_dim, latent_dim),
-            nn.Linear(latent_dim, latent_dim),
-            nn.Dropout(p=0.2),
-            #self.activation()
-        )
-        
-        """
-        Simple integration of BINDTI
-        """
-        #self.bindti = BINDTI_Sprint(self.drug_dim, self.target_dim, 4, 1)
-        
-        """
-        Integration of BINDTI_big
-        """
-        #self.bindti = BINDTI_big(self.drug_dim, self.target_dim, 4, 1)
-        
+
+        # self.bilinear_sim_layer = nn.Sequential(
+        #     nn.Linear(target_dim, target_dim),
+        #     nn.Dropout(p=0.1)
+        # )
+
+        # self.siamesenetwork = SiameseNetwork(target_dim)
+
+        self.cross_attn_sim = CrossAttentionSimilarity(target_dim)
+
         if prot_proj == "avg":
             nn.init.xavier_normal_(self.target_projector[0][1].weight)
 
@@ -126,7 +165,13 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
                 "f1": self.val_f1,
             }
             self.loss_fct = torch.nn.BCELoss()
+            #self.loss_fct = FocalLoss(alpha=-0.25, gamma=2)
+            #self.loss_fct = FocalLoss(alpha=0.25, gamma=2)
+            #self.loss_fct = FocalLoss(alpha=1, gamma=5)
+            #self.aug_loss_fct = FocalLoss(alpha=-1.5, gamma=3)
+            self.aug_loss_fct = FocalLoss(alpha=-1, gamma=2)
             if self.args.loss_type == "focal":
+                print("USING FOCAL LOSS !!!")
                 self.loss_fct = FocalLoss()
         else:
             self.val_mse = torchmetrics.MeanSquaredError()
@@ -149,60 +194,73 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
 
         self.CEWeight = 1 if 'CEWeight' not in args else args.CEWeight
                     
-        self.sigmoid_scalar = nn.Parameter(torch.tensor(5.0))
-        
+
         self.save_hyperparameters()
 
-        self.val_step_outputs = []
-        self.val_step_targets = []
+        self.val_step_outputs  = []
+        self.val_step_targets  = []
         self.test_step_outputs = []
         self.test_step_targets = []
+        
+        self.drug_features_before_coembedding    = []
+        self.protein_features_before_coembedding = []
+        self.drug_features_after_coembedding     = []
+        self.protein_features_after_coembedding  = []
 
-    def forward(self, drug, target, drug_smiles):
+    def forward(self, drug, target):
+        model_size = self.args.model_size
         sigmoid_scalar = self.args.sigmoid_scalar
-        drug = drug.to(dtype=torch.float32) #morgan representation.
-        ##drug = drug.unsqueeze(1)
-        
+
         drug_projection = self.drug_projector(drug)
-        
+
         # Add a batch dimension if it's missing
         if target.dim() == 2:
             target = target.unsqueeze(0)
 
         target_projection = self.target_projector(target)
-        #print(157, f'model, drug.shape : {drug.shape}, target.shape : {target.shape}, target_projection.shape : {target_projection.shape}')
-        # drug.shape torch.Size([64, 1, 2048]), target.shape : torch.Size([64, 1023, 1280]), target_projection.shape : torch.Size([64, 1280])
+
         if self.classify:
-            fused_similarity = (F.cosine_similarity(drug_projection, target_projection))
-            similarity = sigmoid_scalar * fused_similarity
-            
             """
-            For the simple integration of BINDTI, we need this, but no need for the BINDTI_big.
+            Vanila
             """
-            #target = self.target_projector(target)
-            #target = target.unsqueeze(1)
-            #_, _, _, similarity, _ = self.bindti(drug, target)
-            
+            similarity = sigmoid_scalar * F.cosine_similarity(
+                drug_projection, target_projection
+            )
+
             """
-            For the integration of BINDTI_big. 
+            Dot product
             """
-            #drug = drug.squeeze()
-            #_, _, _, similarity, _ = self.bindti(drug, target, drug_smiles)
-            
+            # temperature = 1
+            # similarity = sigmoid_scalar * torch.sum(drug_projection * target_projection, dim=-1) / temperature 
+
             """
-            One dense projector similarity
+            Bilinear
             """
-            ##target_projection = target_projection.unsqueeze(1).permute(0,2,1)
-            #latent_drug = self.dense_predictor(drug)
-            ##latent_drug = self.dense_predictor(drug_projection)
-            ##similarity = latent_drug @ target_projection
-            ##similarity = similarity.squeeze()
-            ##similarity = sigmoid_scalar * similarity
+            # latent_drug = self.bilinear_sim_layer(drug_projection.unsqueeze(1))
+            # target_projection = target_projection.unsqueeze(-1)
+            #print(170, f'latent_drug.shape : {latent_drug.shape}, target_projection.shape : {target_projection.shape}')
+            # latent drug : bs, 1, hidden_dim; target_projection : bs, hidden_dim, 1
+            # sim = torch.bmm(latent_drug, target_projection).squeeze()
+            # similarity = sigmoid_scalar * sim
+
+            """
+            Siamese Network 
+            """
+            # sim = self.siamesenetwork(drug_projection.squeeze(), target_projection.squeeze())
+            # similarity = sigmoid_scalar * sim
+
+            """
+            Cross attention similarity
+            """
+            # sim = self.cross_attn_sim(drug_projection.squeeze(), target_projection.squeeze())
+            # similarity = sigmoid_scalar * sim
+
         else:
             similarity = torch.bmm(
                 drug_projection.view(-1, 1, self.latent_dim),
                 target_projection.view(-1, self.latent_dim, 1),
             ).squeeze()
+
         return drug_projection, target_projection, similarity
 
     def configure_optimizers(self):
@@ -226,7 +284,7 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
     def contrastive_step(self, batch):
         anchor, positive, negative = batch
 
-        anchor_projection = self.target_projector(anchor)
+        anchor_projection   = self.target_projector(anchor)
         positive_projection = self.drug_projector(positive)
         negative_projection = self.drug_projector(negative)
 
@@ -235,20 +293,23 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         return loss
 
     def non_contrastive_step(self, batch, train=True):
-        drug, protein, label, drug_smiles, _ = batch
-        drug, protein, similarity = self.forward(drug, protein, drug_smiles)
-
-
+        drug, protein, label = batch
+        drug, protein, similarity = self.forward(drug, protein)
+        self.drug_features_after_coembedding.append(drug.detach().cpu().numpy())
+        self.protein_features_after_coembedding.append(protein.detach().cpu().numpy())
         if self.classify:
             similarity = torch.squeeze(self.sigmoid(similarity))
 
-        loss = self.loss_fct(similarity, label) 
+        loss = self.loss_fct(similarity, label)
+        aug_loss = self.aug_loss_fct(similarity, label) 
+
         infoloss = 0
         if self.InfoNCEWeight > 0:
             infoloss = self.InfoNCEWeight * self.infoNCE_loss_fct(drug, protein, label)
-
+        # print(f"Loss: {loss}, VICReg: {vicreg_loss}, InfoNCE: {infoloss if self.InfoNCEWeight > 0 else 0}")
         if train:
-            return loss * self.CEWeight, infoloss
+            #return loss * self.CEWeight, aug_loss * 0.75, infoloss
+            return loss * self.CEWeight, aug_loss*0.25, infoloss
         else:
             return loss, infoloss, similarity
 
@@ -266,8 +327,8 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
             else:
                 opt = self.optimizers()
             opt.zero_grad()
-            loss,infoloss = self.non_contrastive_step(batch)
-            self.manual_backward(loss+infoloss)
+            loss,aug_loss,infoloss = self.non_contrastive_step(batch)
+            self.manual_backward(loss+aug_loss+infoloss)
             opt.step()
             self.log("train/loss", loss, sync_dist=True if self.trainer.num_devices > 1 else False)
             if self.InfoNCEWeight > 0:
@@ -293,7 +354,7 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         if self.global_step == 0 and self.global_rank == 0 and not self.args.no_wandb:
             wandb.define_metric("val/aupr", summary="max")
-        _, _, label, _, _ = batch
+        _, _, label = batch
         loss, infoloss, similarity = self.non_contrastive_step(batch, train=False)
         self.log("val/loss", loss, sync_dist=True if self.trainer.num_devices > 1 else False)
         if self.InfoNCEWeight > 0:
@@ -316,17 +377,40 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         self.val_step_targets.clear()
 
     def test_step(self, batch, batch_idx):
-        _, _, label, _, _ = batch
-        _, _, similarity = self.non_contrastive_step(batch, train=False)
-
+        drug_embed_before, protein_embed_before, label = batch
+        
+        _,_, similarity = self.non_contrastive_step(batch, train=False)
+        
+        self.drug_features_before_coembedding.append(drug_embed_before.detach().cpu().numpy())
+        # print(protein_embed_before.shape)
+        # self.protein_features_before_coembedding.append(protein_embed_before)
+        
+        
         self.test_step_outputs.extend(similarity)
         self.test_step_targets.extend(label)
 
         return {"preds": similarity, "target": label}
 
     def on_test_epoch_end(self):
+        import pickle
         for name, metric in self.metrics.items():
             if self.classify:
+                # with open("biosnap_test_outputs.pkl", "wb") as f:
+                #     pickle.dump(torch.Tensor(self.test_step_outputs), f)
+                # with open("biosnap_test_targets.pkl", "wb") as f:
+                #     pickle.dump(torch.Tensor(self.test_step_targets), f)
+                with open("biosnape_drug_before.pkl", "wb") as f:
+                    pickle.dump(np.concatenate(self.drug_features_before_coembedding), f)
+                # with open("biosnap_protein_before.pkl", "wb") as f:
+                #     pickle.dump(torch.concatenate(self.protein_features_before_coembedding), f)
+                    
+                with open("biosnap_drug_after.pkl", "wb") as f:
+                    pickle.dump(np.concatenate(self.drug_features_after_coembedding), f)
+                with open("biosnap_protein_after.pkl", "wb") as f:
+                    pickle.dump(np.concatenate(self.protein_features_after_coembedding), f)
+                    
+                    
+                    
                 metric(torch.Tensor(self.test_step_outputs), torch.Tensor(self.test_step_targets).to(torch.int))
             else:
                 metric(torch.Tensor(self.test_step_outputs).cuda(), torch.Tensor(self.test_step_targets).to(torch.float).cuda())
@@ -344,7 +428,6 @@ class DrugTargetCoembeddingLightning(pl.LightningModule):
         elif sample_type == "target":
             target_projection = self.target_projector(x)
             return target_projection
-
 
 def main():
     from featurizers import ProtBertFeaturizer
