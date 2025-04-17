@@ -1,11 +1,16 @@
 data/
 analysis/
-best_models/
 checkpoints/
 examples/
 wandb/
 SaProt_650M_AF2.pt
 
-wandb/
 *.pt
 *.pkl
+
+# Ignore everything under best_models
+best_models/**
+
+# But keep these specific checkpoint files
+!best_models/biosnap/biosnap_v9.ckpt
+!best_models/original_method/DAVIS/davis-v15.ckpt
